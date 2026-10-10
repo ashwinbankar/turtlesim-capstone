@@ -1,120 +1,116 @@
 #include "rclcpp/rclcpp.hpp"
 #include "turtlesim_msgs/msg/pose.hpp"
 #include "geometry_msgs/msg/twist.hpp"
+#include "my_robot_interfaces/msg/turtle.hpp"
+#include "my_robot_interfaces/msg/turtle_array.hpp"
+#include "my_robot_interfaces/srv/catch_turtle.hpp"
 #include <cmath>
 
-using namespace std::placeholders; // Gives access to _1, _2... for std::bind
-using namespace std::chrono_literals; // Allows writing 0.01s instead of chrono::duration(...)
+using namespace std::placeholders;
+using namespace std::chrono_literals;
 
-class TurtleControllerNode: public rclcpp::Node // Base Class
+class TurtleControllerNode: public rclcpp::Node
 {
-    public:
-    // Constructor: Initializes the node with the name "turtle_controller" to the /turtle1/cmd_vel topic
-    // Also initializes class member variables: turtle's name and boolean status flag
-    TurtleControllerNode(): Node("turtle_controller"), name_("turtle1"), turtlesim_up_{false} // Derived Class
+public:
+    TurtleControllerNode(): Node("turtle_controller"), name_("turtle1"), turtlesim_up_(false)
     {
-        // 1. Sends speed (Twist)
         cmd_vel_publisher_ = this->create_publisher<geometry_msgs::msg::Twist>(name_ + "/cmd_vel", 10);
-
-        // 2. Reads position
+        
         pose_subscriber_ = this->create_subscription<turtlesim_msgs::msg::Pose>(
             name_ + "/pose", 10, std::bind(&TurtleControllerNode::callbackPose, this, _1));
+        
+        // Subscribe to the dynamic list of turtles
+        alive_turtles_subscriber_ = this->create_subscription<my_robot_interfaces::msg::TurtleArray>(
+            "alive_turtles", 10, std::bind(&TurtleControllerNode::callbackAliveTurtles, this, _1));
 
-        // 3. Timer to run control loop (100Hz or 0.01s)
+        // Client to notify the spawner when a catch happens
+        catch_turtle_client_ = this->create_client<my_robot_interfaces::srv::CatchTurtle>("catch_turtle");
+
         control_loop_timer_ = this->create_wall_timer(
             0.01s, std::bind(&TurtleControllerNode::controlLoop, this));
-
-        RCLCPP_INFO(this->get_logger(), "Turtle Controller Node has been started.");
     }
 
-    private:
-    // Two async callbacks run repeatedly
-    // A. callbackPose - Every time new pose arrives
+private:
     void callbackPose(const turtlesim_msgs::msg::Pose::SharedPtr pose)
     {
-        // Extract the actual location data from the incoming message and copy it into our local variable
         pose_ = *pose.get();
-        // Flag that the data is received and control loop can be run
         turtlesim_up_ = true;
     }
 
-    // B. controlLoop - every 0.01s
+    void callbackAliveTurtles(const my_robot_interfaces::msg::TurtleArray::SharedPtr msg)
+    {
+        // Update our local targeting list
+        alive_turtles_ = msg->turtles;
+    }
+
     void controlLoop()
     {
-        // Safety check: Do not calculate commands if we don't know where the turtle is yet
-        if (!turtlesim_up_)
+        // Do nothing if we don't know where we are, or if there are no turtles to catch
+        if (!turtlesim_up_ || alive_turtles_.empty())
         {
             return;
         }
 
-        // Hardcoded target for Step 1 testing
-        double target_x = 8.0;
-        double target_y = 8.0;
+        // Lock onto the first turtle in the array
+        auto target = alive_turtles_[0];
 
-        // Difference between the target and current position
-        double dist_x = target_x - pose_.x;
-        double dist_y = target_y - pose_.y;
-
-        // Calculate the Euclidean distance to the target using the Pythagorean theorem
+        double dist_x = target.x - pose_.x;
+        double dist_y = target.y - pose_.y;
         double distance = std::sqrt(dist_x * dist_x + dist_y * dist_y);
 
-        // Initialize a blank Twist message for velocity commands
         auto msg = geometry_msgs::msg::Twist();
-        msg.linear.x = 2 * distance;
 
-        // If the turtle is farther than 0.5 units from the target, keep moving
         if (distance > 0.5)
         {
-            // Proportional orientation control: Calculate the absolute angle to the target
+            msg.linear.x = 2 * distance;
             double steering_angle = std::atan2(dist_y, dist_x);
-            // Heading error
             double angle_diff = steering_angle - pose_.theta;
-
-            // Normalize angle_diff to keep it within the range of [-pi, pi]
-            // This prevents the turtle from doing inefficient full spins to correct its heafing
-            if (angle_diff > M_PI)
-            {
-                angle_diff -= 2 * M_PI;
-            }
-            else if (angle_diff < -M_PI)
-            {
-                angle_diff += 2 * M_PI;
-            }
-
-            // Apply a proportional gain of 6 to the angular error to turn quickly
+            
+            if (angle_diff > M_PI) { angle_diff -= 2 * M_PI; }
+            else if (angle_diff < -M_PI) { angle_diff += 2 * M_PI; }
+            
             msg.angular.z = 6 * angle_diff;
         }
         else
         {
-            // Target reached! Stop all movement.
+            // Target reached! Stop and initiate the catch.
             msg.linear.x = 0.0;
             msg.angular.z = 0.0;
+            callCatchTurtleService(target.name);
         }
 
-        // Publish the calculated velocities to the simulation
         cmd_vel_publisher_->publish(msg);
     }
 
-    // Private member variables
+    void callCatchTurtleService(std::string turtle_name)
+    {
+        if (!catch_turtle_client_->wait_for_service(1s)) { return; }
+        
+        auto request = std::make_shared<my_robot_interfaces::srv::CatchTurtle::Request>();
+        request->name = turtle_name;
+        
+        catch_turtle_client_->async_send_request(request);
+        
+        // Remove it locally immediately so the controller doesn't spam the service request while waiting for a reply
+        alive_turtles_.erase(alive_turtles_.begin());
+    }
+
     std::string name_;
     turtlesim_msgs::msg::Pose pose_;
     bool turtlesim_up_;
+    std::vector<my_robot_interfaces::msg::Turtle> alive_turtles_;
     
-    // Shared pointers for our ROS 2 communication interfaces
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_publisher_;
     rclcpp::Subscription<turtlesim_msgs::msg::Pose>::SharedPtr pose_subscriber_;
+    rclcpp::Subscription<my_robot_interfaces::msg::TurtleArray>::SharedPtr alive_turtles_subscriber_;
+    rclcpp::Client<my_robot_interfaces::srv::CatchTurtle>::SharedPtr catch_turtle_client_;
     rclcpp::TimerBase::SharedPtr control_loop_timer_;
 };
 
 int main(int argc, char **argv)
 {
-    // Initialize ROS 2 communication
     rclcpp::init(argc, argv);
-    // Create a shared pointer to our custom node
-    auto node = std::make_shared<TurtleControllerNode>();
-    // Keep node alive, process callbacks
-    rclcpp::spin(node);
-    // Clean up upon exit (e.g., when the user presses Ctrl+C)
+    rclcpp::spin(std::make_shared<TurtleControllerNode>());
     rclcpp::shutdown();
     return 0;
 }

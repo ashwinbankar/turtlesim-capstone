@@ -9,18 +9,33 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(turtlesim REQUIRED)
+find_package(turtlesim_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(my_robot_interfaces REQUIRED)
 
-if(BUILD_TESTING)
-  find_package(ament_lint_auto REQUIRED)
-  # the following line skips the linter which checks for copyrights
-  # comment the line when a copyright and license is added to all source files
-  set(ament_cmake_copyright_FOUND TRUE)
-  # the following line skips cpplint (only works in a git repo)
-  # comment the line when this package is in a git repo and when
-  # a copyright and license is added to all source files
-  set(ament_cmake_cpplint_FOUND TRUE)
-  ament_lint_auto_find_test_dependencies()
-endif()
+# Spawner Node
+add_executable(spawner src/turtle_spawner.cpp)
+target_link_libraries(spawner
+  rclcpp::rclcpp
+  turtlesim_msgs::turtlesim_msgs__rosidl_typesupport_cpp
+  geometry_msgs::geometry_msgs__rosidl_typesupport_cpp
+  my_robot_interfaces::my_robot_interfaces__rosidl_typesupport_cpp
+)
+
+# Controller Node
+add_executable(controller src/turtle_controller.cpp)
+target_link_libraries(controller
+  rclcpp::rclcpp
+  turtlesim_msgs::turtlesim_msgs__rosidl_typesupport_cpp
+  geometry_msgs::geometry_msgs__rosidl_typesupport_cpp
+  my_robot_interfaces::my_robot_interfaces__rosidl_typesupport_cpp
+)
+
+# Install Rules
+install(TARGETS
+  controller
+  spawner
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 ament_package()
